@@ -1,0 +1,127 @@
+apiVersion: source.toolkit.fluxcd.io/v1beta1
+kind: HelmRepository
+metadata:
+  name: prometheus-community
+  namespace: monitoring
+spec:
+   interval: 1m0s
+   timeout: 1m0s
+   url: https://prometheus-community.github.io/helm-charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+   name: my-prometheus
+   namespace: monitoring
+spec:
+   chart:
+      spec:
+         chart: prometheus
+         sourceRef:
+              kind: HelmRepository
+              name: prometheus-community
+         version: 14.6.0
+   interval: 1m0s
+   values:
+      alertmanagerFiles:
+          alertmanager.yml:
+                  global: null
+                  route:
+                        group_by: ['alertname']
+                        group_wait: 10s
+                        group_interval: 10s
+                        repeat_interval: 86400s
+                        receiver: 'default-receiver'
+                  receivers:
+                  - name: 'default-receiver'
+                    slack_configs:
+                    - api_url: ""
+                      channel: "#general"
+                      send_resolved: true
+                      title: |-
+                              [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }} for {{ .CommonLabels.job }}
+                              {{- if gt (len .CommonLabels) (len .GroupLabels) -}}
+                                {{" "}}(
+                                {{- with .CommonLabels.Remove .GroupLabels.Names }}
+                                  {{- range $index, $label := .SortedPairs -}}
+                                    {{ if $index }}, {{ end }}
+                                    {{- $label.Name }}="{{ $label.Value -}}"
+                                  {{- end }}
+                                {{- end -}}
+                                )
+                              {{- end }}
+                      text: >-
+                              {{ with index .Alerts 0 -}}
+                                :chart_with_upwards_trend: *<{{ .GeneratorURL }}|Graph>*
+                                {{- if .Annotations.runbook }}   :notebook: *<{{ .Annotations.runbook }}|Runbook>*{{ end }}
+                              {{ end }}
+
+                                *Alert details*:
+                                {{ range .Alerts -}}
+                                  *Alert:* {{ .Annotations.title }}{{ if .Labels.severity }} - `{{ .Labels.severity }}`{{ end }}
+                                *Description:* {{ .Annotations.description }}
+                                *Details:*
+                                  {{ range .Labels.SortedPairs }} • *{{ .Name }}:* `{{ .Value }}`
+                                  {{ end }}
+                                {{ end }}
+
+      serverFiles:
+           alerting_rules.yml:
+                   groups:
+                       - name: My rules
+                         rules:
+                           - alert: Cluster CPU Usage 
+                             expr: sum(rate(container_cpu_usage_seconds_total{id="/"}[5m])) / sum(machine_cpu_cores{}) * 100 > 5
+                             for: 2m
+                             labels:
+                                severity: critical
+                             annotations:
+                                summary: "Cluster CPU Usage  > 90%"
+                                description: "Cluster CPU Usage on host {{$labels.instance}} : (current value: {{ $value }})."
+                           - alert: Cluster Memory Usage
+                             expr: sum(container_memory_working_set_bytes{id="/"})/sum(machine_memory_bytes{}) * 100 > 90
+                             for: 5m
+                             labels:
+                                     severity: page
+                             annotations:
+                                     summary: Cluster Memory Usage > 90%
+                           - alert: Pod Memory usage
+                             expr: sum (container_memory_working_set_bytes{image!="",name=~"^k8s_.*"}) by (container_label_io_kubernetes_pod_name) > 4026531841
+                             for: 5m
+                             labels:
+                                     severity: critical
+                             annotations:
+                                     summary: "Pod Memory usage > 90%"
+                                     description: "Pod Memory usage on host {{$labels.instance}} : (current value: {{ $value }})."
+                           - alert: KubernetesPodNotHealthy
+                             expr: min_over_time(sum by (namespace, pod) (kube_pod_status_phase{phase=~"Pending|Unknown|Failed"})[15m:1m]) > 0
+                             for: 0m
+                             labels:
+                                     severity: critical
+                             annotations:
+                                     summary: Kubernetes Pod not healthy (instance {{ $labels.instance }})
+                                     description: "Pod has been in a non-ready state for longer than 15 minutes.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+                           - alert: KubernetesPodCrashLooping
+                             expr: increase(kube_pod_container_status_restarts_total[1m]) > 3
+                             for: 2m
+                             labels:
+                                     severity: warning
+                             annotations:
+                                     summary: Kubernetes pod crash looping (instance {{ $labels.instance }})
+                                     description: "Pod {{ $labels.pod }} is crash looping\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"  
+                           - alert: KubernetesReplicassetMismatch
+                             expr: kube_deployment_spec_replicas != kube_deployment_status_replicas_available
+                             for: 10m
+                             labels:
+                                     severity: warning
+                             annotations:
+                                     summary: Kubernetes ReplicasSet mismatch (instance {{ $labels.instance }})
+                                     description: "Deployment Replicas mismatch\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+                           - alert: KubernetesStatefulsetReplicasMismatch
+                             expr: kube_statefulset_status_replicas_ready != kube_statefulset_status_replicas
+                             for: 10m
+                             labels:
+                                    severity: warning
+                             annotations:
+                                    summary: Kubernetes StatefulSet replicas mismatch (instance {{ $labels.instance }})
+                                    description: "A StatefulSet does not match the expected number of replicas.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
